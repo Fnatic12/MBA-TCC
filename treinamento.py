@@ -66,7 +66,7 @@ class CarEnv:
         """Reseta o ambiente e inicia um novo episódio"""
         self.clear_actors()
         self.collision_hist = []
-        self.total_distance = 0  # 🔹 Resetando distância percorrida
+        self.total_distance = 0  
 
         spawn_point = random.choice(self.world.get_map().get_spawn_points())
         self.vehicle = self.world.spawn_actor(self.model_3, spawn_point)
@@ -115,17 +115,19 @@ class CarEnv:
         ]
         self.vehicle.apply_control(controls[action])
 
-        time.sleep(1 / FPS)  # 🔹 Ajuste de tempo para manter FPS constante
+        time.sleep(1 / FPS)  
 
         v = self.vehicle.get_velocity()
-        kmh = 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)  # Velocidade em km/h
+        kmh = 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)  
 
-        self.total_distance += (kmh * 1000 / 3600) * (1 / FPS)  # 🔹 Convertendo para metros e acumulando
+        self.total_distance += (kmh * 1000 / 3600) * (1 / FPS)  
 
-        reward = 10 if kmh > 30 else -5
+        reward = kmh / 10  
         if len(self.collision_hist) != 0:
             reward = -200
             done = True
+        elif action == 4:  
+            reward -= 5
         else:
             done = False
 
@@ -167,6 +169,7 @@ if __name__ == '__main__':
         total_reward = 0
         steps = 0
         total_velocity = 0
+        rewards = []  
 
         while not done:
             if np.random.random() > EPSILON:
@@ -177,23 +180,49 @@ if __name__ == '__main__':
             new_state, reward, done, kmh = env.step(action)
             total_reward += reward
             total_velocity += kmh
+            rewards.append(reward)
             steps += 1
+
+            agent.replay_memory.append((state, action, reward, new_state, done))
             state = new_state
 
         EPSILON = max(MIN_EPSILON, EPSILON * EPSILON_DECAY)
 
-        # 🔹 Cálculo da velocidade média e distância percorrida
-        avg_velocity = total_velocity / max(1, steps)  # Evita divisão por zero
-        distance_covered = env.total_distance
+        # 🔹 TREINAMENTO DA REDE NEURAL
+        if len(agent.replay_memory) >= MIN_REPLAY_MEMORY_SIZE:
+            minibatch = random.sample(agent.replay_memory, MINIBATCH_SIZE)
+            states = np.array([transition[0] for transition in minibatch]) / 255.0
+            actions = np.array([transition[1] for transition in minibatch])
+            rewards = np.array([transition[2] for transition in minibatch])
+            next_states = np.array([transition[3] for transition in minibatch]) / 255.0
+            dones = np.array([transition[4] for transition in minibatch])
 
-        # 🔹 Salvando métricas
+            current_qs = agent.model.predict(states, verbose=0)
+            future_qs = agent.target_model.predict(next_states, verbose=0)
+
+            for i in range(MINIBATCH_SIZE):
+                target_q = rewards[i] if dones[i] else rewards[i] + DISCOUNT * np.max(future_qs[i])
+                current_qs[i, actions[i]] = target_q
+
+            loss_value = agent.model.train_on_batch(states, current_qs)
+
+        # 🔹 Cálculo da velocidade média e distância percorrida
+        avg_velocity = total_velocity / max(1, steps)  
+        distance_covered = env.total_distance  
+
+        # 🔹 REGISTRANDO MÉTRICAS NO TENSORBOARD
         with writer.as_default():
             tf.summary.scalar("Recompensa Total", total_reward, step=episode)
+            tf.summary.scalar("Recompensa Média", np.mean(rewards), step=episode)
+            tf.summary.scalar("Recompensa Máx", np.max(rewards), step=episode)
+            tf.summary.scalar("Recompensa Mín", np.min(rewards), step=episode)
+            tf.summary.scalar("Número de colisões", len(env.collision_hist), step=episode)
             tf.summary.scalar("Passos no Episódio", steps, step=episode)
+            tf.summary.scalar("Tempo de sobrevivência (s)", steps / FPS, step=episode)
             tf.summary.scalar("Velocidade Média (km/h)", avg_velocity, step=episode)
             tf.summary.scalar("Distância Percorrida (m)", distance_covered, step=episode)
             tf.summary.scalar("Epsilon", EPSILON, step=episode)
             writer.flush()
 
-    agent.model.save("models/MobileNet_DQN.h5")
-    print("✅ Modelo salvo com sucesso!")
+        # 🔹 Salvando o modelo treinado após cada episódio
+        agent.model.save("models/MobileNet_DQN.h5")
